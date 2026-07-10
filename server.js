@@ -16,14 +16,15 @@ function createRoom(code) {
   return {
     code,
     players: new Map(),
-    state: "lobby", // lobby, betting, answering, results, gameover
+    state: "lobby", // lobby, reveal-category, reveal-answers, reveal-question, answering, results, gameover
     currentQuestion: null,
     questionIndex: 0,
     totalQuestions: 10,
-    bets: new Map(),
-    answers: new Map(),
+    bets: new Map(), // playerId -> { amount, folded }
+    answers: new Map(), // playerId -> { answer, timestamp }
     hostId: null,
     questions: [],
+    answerDeadline: null, // timestamp when answering ends
   };
 }
 
@@ -38,7 +39,7 @@ function generateRoomCode() {
 
 async function fetchQuestions(amount = 10) {
   const response = await fetch(
-    `https://opentdb.com/api.php?amount=${amount}&type=multiple`
+    `https://opentdb.com/api.php?amount=${amount}&difficulty=medium&type=multiple`
   );
   const data = await response.json();
   if (data.response_code !== 0) {
@@ -75,18 +76,28 @@ function getPlayersData(room) {
   return players.sort((a, b) => b.balance - a.balance);
 }
 
-function getDifficultyMultiplier(difficulty) {
-  switch (difficulty) {
-    case "easy":
-      return 1;
-    case "medium":
-      return 1.5;
-    case "hard":
-      return 2;
-    default:
-      return 1;
+function getActivePlayers(room) {
+  // Players who haven't folded
+  const active = [];
+  for (const [id, player] of room.players) {
+    const betInfo = room.bets.get(id);
+    if (!betInfo || !betInfo.folded) {
+      active.push(id);
+    }
   }
+  return active;
 }
+
+function getPot(room) {
+  let pot = 0;
+  for (const [id, betInfo] of room.bets) {
+    pot += betInfo.amount;
+  }
+  return pot;
+}
+
+const ANTE = 5; // forced ante each round
+const ANSWER_TIME_LIMIT = 20; // seconds
 
 io.on("connection", (socket) => {
   let currentRoom = null;
@@ -134,47 +145,80 @@ io.on("connection", (socket) => {
     try {
       room.questions = await fetchQuestions(room.totalQuestions);
       room.questionIndex = 0;
-      startBettingPhase(room);
+      startRound(room);
     } catch (err) {
       socket.emit("error-msg", "Failed to fetch questions. Try again.");
     }
   });
 
-  socket.on("place-bet", (amount) => {
+  // Poker actions: check, raise, fold
+  socket.on("poker-action", ({ action, raiseAmount }) => {
     const room = rooms.get(currentRoom);
-    if (!room || room.state !== "betting") return;
+    if (!room) return;
+    if (!["reveal-category", "reveal-answers", "reveal-question"].includes(room.state)) return;
+
     const player = room.players.get(socket.id);
     if (!player) return;
 
-    const bet = Math.max(0, Math.min(amount, player.balance));
-    room.bets.set(socket.id, bet);
+    const betInfo = room.bets.get(socket.id);
+    if (!betInfo || betInfo.folded || betInfo.locked) return;
 
-    io.to(currentRoom).emit("bet-placed", {
-      playerId: socket.id,
-      hasBet: true,
-      totalBets: room.bets.size,
-      totalPlayers: room.players.size,
-    });
-
-    if (room.bets.size === room.players.size) {
-      startAnsweringPhase(room);
+    if (action === "fold") {
+      betInfo.folded = true;
+      betInfo.locked = true;
+      io.to(currentRoom).emit("player-action", {
+        playerId: socket.id,
+        name: player.name,
+        action: "folded",
+        pot: getPot(room),
+        activePlayers: getActivePlayers(room).length,
+      });
+    } else if (action === "check") {
+      betInfo.locked = true;
+      io.to(currentRoom).emit("player-action", {
+        playerId: socket.id,
+        name: player.name,
+        action: "checked",
+        pot: getPot(room),
+        activePlayers: getActivePlayers(room).length,
+      });
+    } else if (action === "raise") {
+      const amount = Math.max(5, Math.min(raiseAmount || 10, player.balance - betInfo.amount));
+      betInfo.amount += amount;
+      player.balance -= amount;
+      betInfo.locked = true;
+      io.to(currentRoom).emit("player-action", {
+        playerId: socket.id,
+        name: player.name,
+        action: `raised $${amount}`,
+        pot: getPot(room),
+        activePlayers: getActivePlayers(room).length,
+      });
     }
+
+    // Check if all active players have locked in for this phase
+    checkPhaseAdvance(room);
   });
 
   socket.on("submit-answer", (answer) => {
     const room = rooms.get(currentRoom);
     if (!room || room.state !== "answering") return;
 
-    room.answers.set(socket.id, answer);
+    const betInfo = room.bets.get(socket.id);
+    if (!betInfo || betInfo.folded) return;
+    if (room.answers.has(socket.id)) return; // already answered
 
+    room.answers.set(socket.id, { answer, timestamp: Date.now() });
+
+    const activePlayers = getActivePlayers(room);
     io.to(currentRoom).emit("answer-submitted", {
       playerId: socket.id,
-      hasAnswered: true,
       totalAnswers: room.answers.size,
-      totalPlayers: room.players.size,
+      totalActive: activePlayers.length,
     });
 
-    if (room.answers.size === room.players.size) {
+    if (room.answers.size === activePlayers.length) {
+      clearTimeout(room.answerTimer);
       showResults(room);
     }
   });
@@ -187,7 +231,7 @@ io.on("connection", (socket) => {
     if (room.questionIndex >= room.totalQuestions) {
       endGame(room);
     } else {
-      startBettingPhase(room);
+      startRound(room);
     }
   });
 
@@ -218,6 +262,7 @@ io.on("connection", (socket) => {
 
     if (room.players.size === 0) {
       rooms.delete(currentRoom);
+      if (room.answerTimer) clearTimeout(room.answerTimer);
       return;
     }
 
@@ -228,69 +273,200 @@ io.on("connection", (socket) => {
     io.to(currentRoom).emit("players-updated", getPlayersData(room));
     io.to(currentRoom).emit("player-left", playerName);
 
-    // Check if remaining players have all bet/answered
-    if (room.state === "betting" && room.bets.size === room.players.size) {
-      startAnsweringPhase(room);
+    // Check if phase should advance
+    if (["reveal-category", "reveal-answers", "reveal-question"].includes(room.state)) {
+      checkPhaseAdvance(room);
     }
-    if (room.state === "answering" && room.answers.size === room.players.size) {
-      showResults(room);
+    if (room.state === "answering") {
+      const activePlayers = getActivePlayers(room);
+      if (room.answers.size >= activePlayers.length) {
+        clearTimeout(room.answerTimer);
+        showResults(room);
+      }
     }
   });
 
-  function startBettingPhase(room) {
-    room.state = "betting";
+  function startRound(room) {
     room.bets.clear();
     room.answers.clear();
     room.currentQuestion = room.questions[room.questionIndex];
 
-    io.to(currentRoom).emit("betting-phase", {
+    // Collect ante from everyone
+    for (const [id, player] of room.players) {
+      const ante = Math.min(ANTE, player.balance);
+      player.balance -= ante;
+      room.bets.set(id, { amount: ante, folded: false, locked: false });
+    }
+
+    room.state = "reveal-category";
+
+    io.to(currentRoom).emit("reveal-category", {
       questionNumber: room.questionIndex + 1,
       totalQuestions: room.totalQuestions,
       category: room.currentQuestion.category,
       difficulty: room.currentQuestion.difficulty,
+      pot: getPot(room),
       players: getPlayersData(room),
+      ante: ANTE,
     });
+  }
+
+  function checkPhaseAdvance(room) {
+    const activePlayers = getActivePlayers(room);
+
+    // If only one player left, they win the pot
+    if (activePlayers.length <= 1) {
+      awardPotToLastPlayer(room, activePlayers[0]);
+      return;
+    }
+
+    // Check if all active players have locked their action
+    const allLocked = activePlayers.every((id) => {
+      const betInfo = room.bets.get(id);
+      return betInfo && betInfo.locked;
+    });
+
+    if (!allLocked) return;
+
+    // Unlock everyone for next phase
+    for (const [id, betInfo] of room.bets) {
+      if (!betInfo.folded) {
+        betInfo.locked = false;
+      }
+    }
+
+    if (room.state === "reveal-category") {
+      room.state = "reveal-answers";
+      io.to(currentRoom).emit("reveal-answers", {
+        answers: room.currentQuestion.answers,
+        pot: getPot(room),
+        players: getPlayersData(room),
+      });
+    } else if (room.state === "reveal-answers") {
+      room.state = "reveal-question";
+      io.to(currentRoom).emit("reveal-question", {
+        question: room.currentQuestion.question,
+        pot: getPot(room),
+        players: getPlayersData(room),
+      });
+    } else if (room.state === "reveal-question") {
+      startAnsweringPhase(room);
+    }
   }
 
   function startAnsweringPhase(room) {
     room.state = "answering";
+    room.answerDeadline = Date.now() + ANSWER_TIME_LIMIT * 1000;
+
+    const activePlayers = getActivePlayers(room);
+
     io.to(currentRoom).emit("answering-phase", {
       question: room.currentQuestion.question,
       answers: room.currentQuestion.answers,
-      difficulty: room.currentQuestion.difficulty,
+      timeLimit: ANSWER_TIME_LIMIT,
+      pot: getPot(room),
+      activePlayers,
+    });
+
+    // Auto-resolve after time limit
+    room.answerTimer = setTimeout(() => {
+      if (room.state === "answering") {
+        showResults(room);
+      }
+    }, (ANSWER_TIME_LIMIT + 1) * 1000);
+  }
+
+  function awardPotToLastPlayer(room, winnerId) {
+    const pot = getPot(room);
+    if (winnerId) {
+      const winner = room.players.get(winnerId);
+      if (winner) {
+        winner.balance += pot;
+      }
+    }
+
+    room.state = "results";
+    io.to(currentRoom).emit("fold-win", {
+      winnerId,
+      winnerName: winnerId ? room.players.get(winnerId).name : "Nobody",
+      pot,
+      players: getPlayersData(room),
       questionNumber: room.questionIndex + 1,
       totalQuestions: room.totalQuestions,
+      isLastQuestion: room.questionIndex + 1 >= room.totalQuestions,
     });
   }
 
   function showResults(room) {
     room.state = "results";
     const correctAnswer = room.currentQuestion.correctAnswer;
-    const multiplier = getDifficultyMultiplier(room.currentQuestion.difficulty);
+    const activePlayers = getActivePlayers(room);
+    const pot = getPot(room);
     const results = [];
 
+    // Find winners (correct answers) and their timestamps
+    const winners = [];
+    for (const id of activePlayers) {
+      const answerData = room.answers.get(id);
+      const player = room.players.get(id);
+      const correct = answerData && answerData.answer === correctAnswer;
+      if (correct) {
+        winners.push({ id, timestamp: answerData.timestamp });
+      }
+    }
+
+    if (winners.length > 0) {
+      // Sort by speed (fastest first)
+      winners.sort((a, b) => a.timestamp - b.timestamp);
+      const fastestTime = winners[0].timestamp;
+      const slowestTime = winners[winners.length - 1].timestamp;
+      const timeSpread = slowestTime - fastestTime || 1;
+
+      // Distribute pot weighted by speed
+      // Fastest gets most, slowest gets least
+      // Weight: inversely proportional to time taken
+      let totalWeight = 0;
+      const weights = winners.map((w) => {
+        const timeTaken = w.timestamp - fastestTime;
+        const weight = 1 - (timeTaken / (timeSpread + 1)) + 0.5; // 0.5 base so slowest still gets something
+        totalWeight += weight;
+        return { ...w, weight };
+      });
+
+      for (const w of weights) {
+        const share = Math.floor(pot * (w.weight / totalWeight));
+        const player = room.players.get(w.id);
+        if (player) player.balance += share;
+      }
+    }
+    // If no winners, pot is lost (house takes it)
+
+    // Build results for all players in room
     for (const [id, player] of room.players) {
-      const bet = room.bets.get(id) || 0;
-      const answer = room.answers.get(id);
-      const correct = answer === correctAnswer;
-      const earnings = correct ? Math.floor(bet * multiplier) : -bet;
-      player.balance = Math.max(0, player.balance + earnings);
+      const betInfo = room.bets.get(id);
+      const answerData = room.answers.get(id);
+      const folded = betInfo ? betInfo.folded : false;
+      const betAmount = betInfo ? betInfo.amount : 0;
+      const correct = answerData && answerData.answer === correctAnswer;
+      const isWinner = winners.some((w) => w.id === id);
+      const rank = winners.findIndex((w) => w.id === id);
 
       results.push({
         id,
         name: player.name,
-        bet,
-        answer,
-        correct,
-        earnings,
+        bet: betAmount,
+        answer: answerData ? answerData.answer : null,
+        correct: correct || false,
+        folded,
         balance: player.balance,
+        speedRank: isWinner ? rank + 1 : null,
       });
     }
 
     io.to(currentRoom).emit("round-results", {
       correctAnswer,
-      difficulty: room.currentQuestion.difficulty,
-      multiplier,
+      pot,
+      winnersCount: winners.length,
       results: results.sort((a, b) => b.balance - a.balance),
       questionNumber: room.questionIndex + 1,
       totalQuestions: room.totalQuestions,
@@ -309,5 +485,5 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Trivia server running on http://localhost:${PORT}`);
+  console.log(`Parlay All Day running on http://localhost:${PORT}`);
 });

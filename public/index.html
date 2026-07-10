@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Trivia Bet</title>
+  <title>Parlay All Day</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -11,8 +14,8 @@
     <!-- Join/Create Screen -->
     <section id="screen-home" class="screen active">
       <div class="container">
-        <h1 class="logo">🎲 Trivia Bet</h1>
-        <p class="tagline">Bet big. Answer right. Win it all.</p>
+        <h1 class="logo">🎰 Parlay All Day</h1>
+        <p class="tagline">Stack your bets. Trust your brain. Get that bag 💰</p>
         <div class="form-group">
           <label for="player-name">Your Name</label>
           <input type="text" id="player-name" placeholder="Enter your name" maxlength="16" autocomplete="off" />
@@ -43,30 +46,44 @@
       </div>
     </section>
 
-    <!-- Betting Screen -->
-    <section id="screen-betting" class="screen">
+    <!-- Reveal Screen (category -> answers -> question) -->
+    <section id="screen-reveal" class="screen">
       <div class="container">
         <div class="question-header">
-          <span id="bet-progress" class="progress-badge"></span>
-          <span id="bet-difficulty" class="difficulty-badge"></span>
+          <span id="reveal-progress" class="progress-badge"></span>
+          <span id="reveal-pot" class="pot-badge">Pot: $0</span>
         </div>
-        <p class="category" id="bet-category"></p>
-        <h2>Place Your Bet</h2>
-        <p class="balance-display">Your balance: $<span id="bet-balance">100</span></p>
-        <div class="bet-controls">
-          <div class="bet-presets">
-            <button class="btn btn-small bet-preset" data-pct="10">10%</button>
-            <button class="btn btn-small bet-preset" data-pct="25">25%</button>
-            <button class="btn btn-small bet-preset" data-pct="50">50%</button>
-            <button class="btn btn-small bet-preset" data-pct="100">ALL IN</button>
-          </div>
-          <div class="form-group">
-            <input type="range" id="bet-slider" min="0" max="100" value="10" />
-            <div class="bet-amount">$<span id="bet-value">10</span></div>
-          </div>
-          <button id="btn-place-bet" class="btn btn-primary">Lock In Bet</button>
+
+        <div id="reveal-category-section" class="reveal-section">
+          <div class="reveal-label">📂 Category</div>
+          <div id="reveal-category-text" class="reveal-content"></div>
         </div>
-        <div id="bet-status" class="status-text"></div>
+
+        <div id="reveal-answers-section" class="reveal-section hidden">
+          <div class="reveal-label">🃏 Answer Choices</div>
+          <div id="reveal-answers-list" class="reveal-answers"></div>
+        </div>
+
+        <div id="reveal-question-section" class="reveal-section hidden">
+          <div class="reveal-label">❓ Question</div>
+          <div id="reveal-question-text" class="reveal-content question-text"></div>
+        </div>
+
+        <div class="poker-actions" id="poker-actions">
+          <button id="btn-fold" class="btn btn-danger">Fold 🃏</button>
+          <button id="btn-check" class="btn btn-secondary">Check ✓</button>
+          <div class="raise-group">
+            <button id="btn-raise" class="btn btn-primary">Raise 💰</button>
+            <div class="raise-amount-control hidden" id="raise-controls">
+              <input type="range" id="raise-slider" min="5" max="50" value="10" step="5" />
+              <span id="raise-value">$10</span>
+              <button id="btn-confirm-raise" class="btn btn-small btn-primary">Confirm</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="action-status" class="status-text"></div>
+        <div id="action-log" class="action-log"></div>
       </div>
     </section>
 
@@ -74,8 +91,8 @@
     <section id="screen-answering" class="screen">
       <div class="container">
         <div class="question-header">
-          <span id="answer-progress" class="progress-badge"></span>
-          <span id="answer-difficulty" class="difficulty-badge"></span>
+          <span id="answer-pot" class="pot-badge">Pot: $0</span>
+          <span id="answer-timer" class="timer-badge">20s</span>
         </div>
         <h2 id="question-text" class="question-text"></h2>
         <div id="answer-options" class="answer-grid"></div>
@@ -86,10 +103,10 @@
     <!-- Results Screen -->
     <section id="screen-results" class="screen">
       <div class="container">
-        <h2>Results</h2>
+        <h2 id="results-title">Results</h2>
         <div id="correct-answer-display" class="correct-answer"></div>
         <div id="results-list" class="results-list"></div>
-        <button id="btn-next" class="btn btn-primary hidden">Next Question</button>
+        <button id="btn-next" class="btn btn-primary hidden">Next Round</button>
       </div>
     </section>
 

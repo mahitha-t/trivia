@@ -4,6 +4,7 @@ const socket = io();
 let playerId = null;
 let isHost = false;
 let myBalance = 100;
+let timerInterval = null;
 
 // DOM elements
 const screens = document.querySelectorAll(".screen");
@@ -35,6 +36,18 @@ function decodeHTML(html) {
   return el.value;
 }
 
+function addActionLog(msg) {
+  const log = document.getElementById("action-log");
+  const entry = document.createElement("div");
+  entry.className = "log-entry";
+  entry.textContent = msg;
+  log.prepend(entry);
+  // Keep only last 5 entries
+  while (log.children.length > 5) {
+    log.removeChild(log.lastChild);
+  }
+}
+
 // Home screen
 document.getElementById("btn-join-toggle").addEventListener("click", () => {
   document.getElementById("join-section").classList.toggle("hidden");
@@ -54,7 +67,6 @@ document.getElementById("btn-join").addEventListener("click", () => {
   socket.emit("join-room", { code, name });
 });
 
-// Allow Enter key on room code input
 document.getElementById("room-code").addEventListener("keydown", (e) => {
   if (e.key === "Enter") document.getElementById("btn-join").click();
 });
@@ -68,29 +80,56 @@ document.getElementById("btn-start").addEventListener("click", () => {
   socket.emit("start-game");
 });
 
-// Betting
-const betSlider = document.getElementById("bet-slider");
-const betValue = document.getElementById("bet-value");
-
-betSlider.addEventListener("input", () => {
-  betValue.textContent = betSlider.value;
+// Poker actions
+document.getElementById("btn-fold").addEventListener("click", () => {
+  socket.emit("poker-action", { action: "fold" });
+  disablePokerActions();
+  document.getElementById("action-status").textContent = "You folded 🃏";
 });
 
-document.querySelectorAll(".bet-preset").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const pct = parseInt(btn.dataset.pct);
-    const amount = Math.floor(myBalance * (pct / 100));
-    betSlider.value = amount;
-    betValue.textContent = amount;
-  });
+document.getElementById("btn-check").addEventListener("click", () => {
+  socket.emit("poker-action", { action: "check" });
+  disablePokerActions();
+  document.getElementById("action-status").textContent = "Checked ✓";
 });
 
-document.getElementById("btn-place-bet").addEventListener("click", () => {
-  const bet = parseInt(betSlider.value);
-  socket.emit("place-bet", bet);
-  document.getElementById("btn-place-bet").disabled = true;
-  document.getElementById("btn-place-bet").textContent = "Bet Locked ✓";
+document.getElementById("btn-raise").addEventListener("click", () => {
+  const controls = document.getElementById("raise-controls");
+  controls.classList.toggle("hidden");
 });
+
+const raiseSlider = document.getElementById("raise-slider");
+const raiseValue = document.getElementById("raise-value");
+raiseSlider.addEventListener("input", () => {
+  raiseValue.textContent = `$${raiseSlider.value}`;
+});
+
+document.getElementById("btn-confirm-raise").addEventListener("click", () => {
+  const amount = parseInt(raiseSlider.value);
+  socket.emit("poker-action", { action: "raise", raiseAmount: amount });
+  disablePokerActions();
+  document.getElementById("action-status").textContent = `Raised $${amount} 💰`;
+});
+
+function disablePokerActions() {
+  document.getElementById("btn-fold").disabled = true;
+  document.getElementById("btn-check").disabled = true;
+  document.getElementById("btn-raise").disabled = true;
+  document.getElementById("btn-confirm-raise").disabled = true;
+  document.getElementById("raise-controls").classList.add("hidden");
+}
+
+function enablePokerActions() {
+  document.getElementById("btn-fold").disabled = false;
+  document.getElementById("btn-check").disabled = false;
+  document.getElementById("btn-raise").disabled = false;
+  document.getElementById("btn-confirm-raise").disabled = false;
+  document.getElementById("action-status").textContent = "";
+  // Update raise slider max based on balance
+  raiseSlider.max = Math.max(5, myBalance);
+  raiseSlider.value = Math.min(10, myBalance);
+  raiseValue.textContent = `$${raiseSlider.value}`;
+}
 
 // Results
 document.getElementById("btn-next").addEventListener("click", () => {
@@ -136,7 +175,6 @@ socket.on("players-updated", (players) => {
     )
     .join("");
 
-  // Update my balance
   const me = players.find((p) => p.id === playerId);
   if (me) myBalance = me.balance;
 });
@@ -145,41 +183,57 @@ socket.on("player-left", (name) => {
   showToast(`${name} left the game`);
 });
 
-socket.on("betting-phase", ({ questionNumber, totalQuestions, category, difficulty, players }) => {
-  document.getElementById("bet-progress").textContent = `${questionNumber}/${totalQuestions}`;
+// Reveal phases
+socket.on("reveal-category", ({ questionNumber, totalQuestions, category, difficulty, pot, players }) => {
+  document.getElementById("reveal-progress").textContent = `Round ${questionNumber}/${totalQuestions}`;
+  document.getElementById("reveal-pot").textContent = `Pot: $${pot}`;
+  document.getElementById("reveal-category-text").textContent = decodeHTML(category);
 
-  const diffBadge = document.getElementById("bet-difficulty");
-  diffBadge.textContent = difficulty;
-  diffBadge.className = `difficulty-badge ${difficulty}`;
+  // Reset reveal sections
+  document.getElementById("reveal-category-section").classList.remove("hidden");
+  document.getElementById("reveal-answers-section").classList.add("hidden");
+  document.getElementById("reveal-question-section").classList.add("hidden");
+  document.getElementById("action-log").innerHTML = "";
 
-  document.getElementById("bet-category").textContent = decodeHTML(category);
-  document.getElementById("bet-balance").textContent = myBalance;
-  document.getElementById("bet-status").textContent = "";
+  // Update balance
+  const me = players.find((p) => p.id === playerId);
+  if (me) myBalance = me.balance;
 
-  // Reset bet controls
-  const maxBet = myBalance;
-  betSlider.max = maxBet;
-  betSlider.value = Math.min(10, maxBet);
-  betValue.textContent = betSlider.value;
-
-  const betBtn = document.getElementById("btn-place-bet");
-  betBtn.disabled = false;
-  betBtn.textContent = "Lock In Bet";
-
-  showScreen("screen-betting");
+  enablePokerActions();
+  showScreen("screen-reveal");
 });
 
-socket.on("bet-placed", ({ totalBets, totalPlayers }) => {
-  document.getElementById("bet-status").textContent = `${totalBets}/${totalPlayers} players have bet`;
+socket.on("reveal-answers", ({ answers, pot, players }) => {
+  document.getElementById("reveal-pot").textContent = `Pot: $${pot}`;
+  document.getElementById("reveal-answers-section").classList.remove("hidden");
+  document.getElementById("reveal-answers-list").innerHTML = answers
+    .map((a) => `<div class="reveal-answer-item">${decodeHTML(a)}</div>`)
+    .join("");
+
+  const me = players.find((p) => p.id === playerId);
+  if (me) myBalance = me.balance;
+
+  enablePokerActions();
 });
 
-socket.on("answering-phase", ({ question, answers, difficulty, questionNumber, totalQuestions }) => {
-  document.getElementById("answer-progress").textContent = `${questionNumber}/${totalQuestions}`;
+socket.on("reveal-question", ({ question, pot, players }) => {
+  document.getElementById("reveal-pot").textContent = `Pot: $${pot}`;
+  document.getElementById("reveal-question-section").classList.remove("hidden");
+  document.getElementById("reveal-question-text").innerHTML = decodeHTML(question);
 
-  const diffBadge = document.getElementById("answer-difficulty");
-  diffBadge.textContent = difficulty;
-  diffBadge.className = `difficulty-badge ${difficulty}`;
+  const me = players.find((p) => p.id === playerId);
+  if (me) myBalance = me.balance;
 
+  enablePokerActions();
+});
+
+socket.on("player-action", ({ name, action, pot, activePlayers }) => {
+  document.getElementById("reveal-pot").textContent = `Pot: $${pot}`;
+  addActionLog(`${name} ${action}`);
+});
+
+socket.on("answering-phase", ({ question, answers, timeLimit, pot, activePlayers }) => {
+  document.getElementById("answer-pot").textContent = `Pot: $${pot}`;
   document.getElementById("question-text").innerHTML = decodeHTML(question);
 
   const grid = document.getElementById("answer-options");
@@ -191,63 +245,138 @@ socket.on("answering-phase", ({ question, answers, difficulty, questionNumber, t
     )
     .join("");
 
-  // Answer click handlers
-  grid.querySelectorAll(".answer-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const answer = decodeURIComponent(btn.dataset.answer);
-      socket.emit("submit-answer", answer);
-
-      grid.querySelectorAll(".answer-btn").forEach((b) => {
-        b.disabled = true;
-        b.classList.remove("selected");
-      });
-      btn.classList.add("selected");
+  // Check if player is active (not folded)
+  const isActive = activePlayers.includes(playerId);
+  if (!isActive) {
+    grid.querySelectorAll(".answer-btn").forEach((btn) => {
+      btn.disabled = true;
     });
-  });
+    document.getElementById("answer-status").textContent = "You folded this round 🃏";
+  } else {
+    grid.querySelectorAll(".answer-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const answer = decodeURIComponent(btn.dataset.answer);
+        socket.emit("submit-answer", answer);
+        grid.querySelectorAll(".answer-btn").forEach((b) => {
+          b.disabled = true;
+          b.classList.remove("selected");
+        });
+        btn.classList.add("selected");
+        document.getElementById("answer-status").textContent = "Answer locked in! ⏳";
+      });
+    });
+    document.getElementById("answer-status").textContent = "";
+  }
 
-  document.getElementById("answer-status").textContent = "";
+  // Start countdown timer
+  let timeLeft = timeLimit;
+  const timerEl = document.getElementById("answer-timer");
+  timerEl.textContent = `${timeLeft}s`;
+  timerEl.classList.remove("timer-urgent");
+
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    timeLeft--;
+    timerEl.textContent = `${timeLeft}s`;
+    if (timeLeft <= 5) timerEl.classList.add("timer-urgent");
+    if (timeLeft <= 0) {
+      clearInterval(timerInterval);
+      timerEl.textContent = "⏰";
+    }
+  }, 1000);
+
   showScreen("screen-answering");
 });
 
-socket.on("answer-submitted", ({ totalAnswers, totalPlayers }) => {
-  document.getElementById("answer-status").textContent = `${totalAnswers}/${totalPlayers} players answered`;
+socket.on("answer-submitted", ({ totalAnswers, totalActive }) => {
+  document.getElementById("answer-status").textContent =
+    `${totalAnswers}/${totalActive} players answered`;
 });
 
-socket.on("round-results", ({ correctAnswer, difficulty, multiplier, results, questionNumber, totalQuestions, isLastQuestion }) => {
-  const correctDiv = document.getElementById("correct-answer-display");
-  correctDiv.innerHTML = `
-    <div class="label">Correct Answer (${difficulty} ×${multiplier})</div>
+socket.on("fold-win", ({ winnerName, pot, players, questionNumber, totalQuestions, isLastQuestion }) => {
+  if (timerInterval) clearInterval(timerInterval);
+
+  document.getElementById("results-title").textContent = "Everyone Folded!";
+  document.getElementById("correct-answer-display").innerHTML = `
+    <div class="label">Winner by fold</div>
+    <div class="answer">${winnerName} takes the pot of $${pot} 🎉</div>
+  `;
+
+  document.getElementById("results-list").innerHTML = players
+    .map(
+      (p) => `
+    <div class="result-item">
+      <div class="info"><span class="name">${p.name}</span></div>
+      <div class="new-balance">$${p.balance}</div>
+    </div>
+  `
+    )
+    .join("");
+
+  const nextBtn = document.getElementById("btn-next");
+  if (isHost) {
+    nextBtn.classList.remove("hidden");
+    nextBtn.textContent = isLastQuestion ? "See Final Results" : "Next Round";
+  } else {
+    nextBtn.classList.add("hidden");
+  }
+
+  showScreen("screen-results");
+});
+
+socket.on("round-results", ({ correctAnswer, pot, winnersCount, results, questionNumber, totalQuestions, isLastQuestion }) => {
+  if (timerInterval) clearInterval(timerInterval);
+
+  document.getElementById("results-title").textContent = "Results";
+
+  const potMsg = winnersCount > 0
+    ? `${winnersCount} winner${winnersCount > 1 ? "s" : ""} split $${pot} pot (by speed!)`
+    : `Nobody got it right — $${pot} lost to the house 💸`;
+
+  document.getElementById("correct-answer-display").innerHTML = `
+    <div class="label">${potMsg}</div>
     <div class="answer">${decodeHTML(correctAnswer)}</div>
   `;
 
   const list = document.getElementById("results-list");
   list.innerHTML = results
     .map(
-      (r) => `
-    <div class="result-item ${r.correct ? "correct" : "wrong"}">
+      (r) => {
+        let statusText = "";
+        let statusClass = "";
+        if (r.folded) {
+          statusText = "Folded";
+          statusClass = "folded";
+        } else if (r.correct) {
+          statusText = r.speedRank === 1 ? "⚡ Fastest!" : `#${r.speedRank} speed`;
+          statusClass = "correct";
+        } else if (r.answer === null) {
+          statusText = "No answer (time up)";
+          statusClass = "wrong";
+        } else {
+          statusText = "Wrong";
+          statusClass = "wrong";
+        }
+        return `
+    <div class="result-item ${statusClass}">
       <div class="info">
         <span class="name">${r.name}</span>
-        <span class="bet-info">Bet $${r.bet} → ${r.correct ? "✓" : "✗"}</span>
+        <span class="bet-info">Bet $${r.bet} · ${statusText}</span>
       </div>
-      <div style="text-align:right">
-        <div class="earnings ${r.earnings >= 0 ? "positive" : "negative"}">
-          ${r.earnings >= 0 ? "+" : ""}$${r.earnings}
-        </div>
-        <div class="new-balance">Balance: $${r.balance}</div>
-      </div>
+      <div class="new-balance">$${r.balance}</div>
     </div>
-  `
+  `;
+      }
     )
     .join("");
 
-  // Update my balance
   const me = results.find((r) => r.id === playerId);
   if (me) myBalance = me.balance;
 
   const nextBtn = document.getElementById("btn-next");
   if (isHost) {
     nextBtn.classList.remove("hidden");
-    nextBtn.textContent = isLastQuestion ? "See Final Results" : "Next Question";
+    nextBtn.textContent = isLastQuestion ? "See Final Results" : "Next Round";
   } else {
     nextBtn.classList.add("hidden");
   }
